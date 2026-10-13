@@ -1,6 +1,6 @@
 # ProxiSpeak
 
-ProxiSpeak is a 2D virtual workspace featuring proximity-based communication, designed to make remote collaboration feel more natural. Users move around a shared virtual workspace as avatars, with communication between users depending dynamically on their proximity to each other.
+ProxiSpeak is a 2D virtual workspace featuring proximity-based communication, designed to make remote collaboration feel more natural. Users move around a shared virtual workspace as avatars, with communication between users depending dynamically on their proximity to each other
 
 ---
 
