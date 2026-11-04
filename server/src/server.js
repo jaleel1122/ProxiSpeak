@@ -6,9 +6,13 @@ import { Server as SocketIOServer } from 'socket.io';
 import healthRoutes from './routes/health.routes.js';
 import { registerSocketHandlers } from './socket/index.js';
 import { corsOptions, getAllowedOrigins } from './config/cors.js';
+import { connectDatabase } from './config/database.js';
 
 // Load environment variables
 dotenv.config();
+
+// Connect to MongoDB
+connectDatabase();
 
 const PORT = process.env.PORT || 3001;
 const allowedOrigins = getAllowedOrigins();
