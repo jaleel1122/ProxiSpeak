@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { ObjectId } from "mongodb";
 import {
   checkPassword,
@@ -10,6 +11,32 @@ import {
 import { usersCol } from "../db.js";
 
 const router = Router();
+
+/**
+ * In-memory rate limiters for authentication endpoints.
+ * NOTE: For horizontally scaled production instances across multiple Node.js processes,
+ * an external distributed store (such as rate-limit-redis) must be used so rate limit
+ * counters are shared across all backend nodes.
+ *
+ * NOTE ON REVERSE PROXIES:
+ * When running behind a reverse proxy (e.g., Cloudflare, AWS ALB, Nginx), Express must
+ * be configured with `app.set("trust proxy", <hops>)` for `req.ip` to reflect the client IP.
+ */
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 attempts per 15 min per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many login attempts. Please try again later." },
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5, // 5 account registrations per hour per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many accounts created from this IP. Please try again later." },
+});
 
 const COLORS = [
   "#d4533e",
@@ -42,7 +69,7 @@ function validateCredentials(email, password, { requireName, displayName } = {})
   return "";
 }
 
-router.post("/register", async (req, res) => {
+router.post("/register", registerLimiter, async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || "");
@@ -73,7 +100,7 @@ router.post("/register", async (req, res) => {
   }
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", loginLimiter, async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || "");

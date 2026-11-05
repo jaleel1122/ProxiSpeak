@@ -31,18 +31,67 @@ function isSdp(sdp, type) {
     sdp &&
       sdp.type === type &&
       typeof sdp.sdp === "string" &&
-      sdp.sdp.length > 0 &&
-      sdp.sdp.length < 20_000
+      sdp.sdp.length >= 10 &&
+      sdp.sdp.length <= 15_000 &&
+      (sdp.sdp.includes("v=") || sdp.sdp.includes("m=audio"))
   );
 }
 
 function isCandidate(candidate) {
-  return Boolean(
-    candidate &&
-      typeof candidate === "object" &&
-      typeof candidate.candidate === "string" &&
-      candidate.candidate.length < 2_000
-  );
+  if (!candidate || typeof candidate !== "object") return false;
+  const str = candidate.candidate;
+  if (typeof str !== "string" || str.length === 0 || str.length > 1_500) return false;
+  const mid = candidate.sdpMid;
+  if (mid !== null && mid !== undefined && (typeof mid !== "string" || mid.length > 50)) return false;
+  const mLine = candidate.sdpMLineIndex;
+  if (mLine !== null && mLine !== undefined && (!Number.isInteger(mLine) || mLine < 0 || mLine > 100)) return false;
+  return true;
+}
+
+/**
+ * Token bucket rate limiter for movement events.
+ * Normal client movement emits once every ~50ms (20 moves/sec).
+ * Capacity: 10 moves (allows natural network jitter bursts).
+ * Refill: 25 moves/sec.
+ */
+function checkMoveRate(socket) {
+  const now = Date.now();
+  const elapsed = (now - socket.moveBucketLast) / 1000;
+  socket.moveBucket = Math.min(10, socket.moveBucket + elapsed * 25);
+  socket.moveBucketLast = now;
+  if (socket.moveBucket < 1) return false;
+  socket.moveBucket -= 1;
+  return true;
+}
+
+/**
+ * Token bucket rate limiter for WebRTC signaling.
+ * Allows initial negotiation bursts (offer + answer + 10-20 ICE candidates).
+ * Socket capacity: 35 signals, refills at 10/sec.
+ * Per-peer capacity: 25 signals, refills at 8/sec.
+ */
+function checkSignalRate(socket, toId) {
+  const now = Date.now();
+  const socketElapsed = (now - socket.signalBucketLast) / 1000;
+  socket.signalBucket = Math.min(35, socket.signalBucket + socketElapsed * 10);
+  socket.signalBucketLast = now;
+  if (socket.signalBucket < 1) return false;
+
+  if (!socket.peerSignalBuckets) socket.peerSignalBuckets = new Map();
+  let peerBucket = socket.peerSignalBuckets.get(toId);
+  if (!peerBucket) {
+    peerBucket = { tokens: 25, last: now };
+    socket.peerSignalBuckets.set(toId, peerBucket);
+  } else {
+    const peerElapsed = (now - peerBucket.last) / 1000;
+    peerBucket.tokens = Math.min(25, peerBucket.tokens + peerElapsed * 8);
+    peerBucket.last = now;
+  }
+  if (peerBucket.tokens < 1) return false;
+
+  socket.signalBucket -= 1;
+  peerBucket.tokens -= 1;
+  return true;
 }
 
 export function attachRealtime(httpServer) {
@@ -106,19 +155,47 @@ export function attachRealtime(httpServer) {
     }, 100);
   }
 
+  // Proximity authorization cache to prevent Atlas signaling amplification DoS.
+  // Stores verified Atlas pair authorizations with 1000ms TTL.
+  // Immediately invalidated whenever users move past leave distance, leave, or disconnect.
+  const proximityAuthCache = new Map();
+
   async function relay(socket, event, payload) {
     const to = payload?.to;
-    if (typeof to !== "string" || !to || to === socket.user.id) return;
+    if (typeof to !== "string" || !to || to === socket.user.id || to.length > 64) return;
+
+    // Fix 2: Per-socket and per-peer signaling rate limiting
+    if (!checkSignalRate(socket, to)) return;
+
     const from = getPlayer(socket.user.id);
     const target = getPlayer(to);
     if (!from || !target || !from.linked.includes(to)) return;
 
-    let allowed = false;
-    try {
-      allowed = await pairWithinLeave(from, target);
-    } catch (err) {
-      console.error("Signal check failed:", err.message);
+    // Fix 2: Real-time server-authoritative distance check
+    // If users are beyond leave threshold, immediately discard signal and invalidate cache
+    const realTimeDistance = Math.hypot(from.x - target.x, from.y - target.y);
+    if (realTimeDistance > OFFICE.leave) {
+      proximityAuthCache.delete(`${from.id}:${to}`);
+      proximityAuthCache.delete(`${to}:${from.id}`);
       return;
+    }
+
+    // Fix 2: Efficient proximity authorization without unnecessary Atlas queries on every packet
+    const pairKey = `${from.id}:${to}`;
+    const cached = proximityAuthCache.get(pairKey);
+    const now = Date.now();
+    let allowed = false;
+
+    if (cached && now - cached.at < 1000) {
+      allowed = cached.allowed;
+    } else {
+      try {
+        allowed = await pairWithinLeave(from, target);
+        proximityAuthCache.set(pairKey, { allowed, at: now });
+      } catch (err) {
+        console.error("Signal check failed:", err.message);
+        return;
+      }
     }
     if (!allowed) return;
 
@@ -144,6 +221,11 @@ export function attachRealtime(httpServer) {
 
   io.on("connection", (socket) => {
     let joined = false;
+    socket.moveBucket = 10;
+    socket.moveBucketLast = Date.now();
+    socket.signalBucket = 35;
+    socket.signalBucketLast = Date.now();
+    socket.peerSignalBuckets = new Map();
     socket.join(socket.user.id);
 
     socket.on("office:join", async (payload, ack) => {
@@ -192,6 +274,7 @@ export function attachRealtime(httpServer) {
 
     socket.on("avatar:move", ({ x, y } = {}) => {
       if (!joined) return;
+      if (!checkMoveRate(socket)) return;
       const result = tryMove(socket.user.id, Number(x), Number(y));
       if (!result.ok) {
         if (result.correct) socket.emit("avatar:correct", result.correct);
@@ -221,6 +304,11 @@ export function attachRealtime(httpServer) {
       const current = getPlayer(socket.user.id);
       if (!current || current.socketId !== socket.id) return;
       removePlayer(socket.user.id);
+      for (const key of proximityAuthCache.keys()) {
+        if (key.startsWith(`${socket.user.id}:`) || key.endsWith(`:${socket.user.id}`)) {
+          proximityAuthCache.delete(key);
+        }
+      }
       socket.to(OFFICE.id).emit("player:left", { id: socket.user.id });
       removePresence(socket.user.id)
         .then(() => scheduleProximity())
