@@ -94,6 +94,21 @@ function checkSignalRate(socket, toId) {
   return true;
 }
 
+let activeIo = null;
+
+/**
+ * Revokes active WebSocket sessions for a user whose session was invalidated or logged out.
+ * Emits 'session:revoked' and forcefully closes sockets in the user's room.
+ */
+export function revokeUserSockets(userId) {
+  if (!activeIo) return;
+  const targetId = String(userId);
+  activeIo.to(targetId).emit("session:revoked");
+  activeIo.in(targetId).disconnectSockets(true);
+  removePlayer(targetId);
+  removePresence(targetId).catch(() => {});
+}
+
 export function attachRealtime(httpServer) {
   const io = new Server(httpServer, {
     cors: { origin: ALLOWED_ORIGINS, methods: ["GET", "POST"] },
@@ -101,6 +116,7 @@ export function attachRealtime(httpServer) {
     pingTimeout: 20_000,
     maxHttpBufferSize: 100_000,
   });
+  activeIo = io;
 
   io.use(authenticateSocket);
 

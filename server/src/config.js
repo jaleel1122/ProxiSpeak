@@ -3,11 +3,34 @@ import dotenv from "dotenv";
 dotenv.config();
 
 export const PORT = Number(process.env.PORT) || 3001;
-export const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || process.env.CLIENT_URL || "http://localhost:5173";
+export const NODE_ENV = process.env.NODE_ENV || "development";
+export const IS_PRODUCTION = NODE_ENV === "production";
+export const TRUST_PROXY = process.env.TRUST_PROXY?.trim() || "";
 
-export const ALLOWED_ORIGINS = [
-  ...new Set([CLIENT_ORIGIN, "http://localhost:5173", "http://127.0.0.1:5173"]),
-];
+export const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || process.env.CLIENT_URL || "";
+
+function resolveAllowedOrigins() {
+  const devOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
+  if (IS_PRODUCTION) {
+    if (!CLIENT_ORIGIN) {
+      throw new Error(
+        "FATAL: In production, CLIENT_ORIGIN (or CLIENT_URL) must be set to the frontend origin (e.g. https://yourdomain.com)."
+      );
+    }
+    const origins = CLIENT_ORIGIN.split(",")
+      .map((o) => o.trim())
+      .filter(Boolean);
+    if (!origins.length) {
+      throw new Error("FATAL: CLIENT_ORIGIN cannot be empty in production.");
+    }
+    // Strict production allowlist (localhost origins excluded)
+    return [...new Set(origins)];
+  }
+  // Development mode: include configured origin (if any) and local dev servers
+  return [...new Set([CLIENT_ORIGIN || "http://localhost:5173", ...devOrigins])];
+}
+
+export const ALLOWED_ORIGINS = resolveAllowedOrigins();
 
 export const MONGODB_URI = process.env.MONGODB_URI?.trim() || "";
 export const MONGODB_DB = process.env.MONGODB_DB?.trim() || "proxispeak";

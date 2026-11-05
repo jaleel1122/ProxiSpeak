@@ -9,8 +9,13 @@ import {
   signToken,
 } from "../auth.js";
 import { usersCol } from "../db.js";
+import { revokeUserSockets } from "../realtime.js";
 
 const router = Router();
+
+// Constant-time dummy hash used when an email is not registered.
+// Prevents timing-based user enumeration attacks by equalizing bcrypt execution time.
+const DUMMY_HASH = "$2a$10$7EqJtq98hPqEX7fNZaOD..8wX7HkR5V2w7aE4xU4oUuR7Yw7Ld2Wy";
 
 /**
  * In-memory rate limiters for authentication endpoints.
@@ -86,10 +91,11 @@ router.post("/register", registerLimiter, async (req, res) => {
       passwordHash,
       displayName,
       color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      tokenVersion: 1,
       createdAt: new Date(),
     });
     const stored = await usersCol().findOne({ _id: result.insertedId });
-    res.status(201).json({ token: signToken(result.insertedId), user: publicUser(stored) });
+    res.status(201).json({ token: signToken(result.insertedId, 1), user: publicUser(stored) });
   } catch (err) {
     if (err?.code === 11000) {
       res.status(409).json({ error: "An account with that email already exists." });
@@ -111,13 +117,17 @@ router.post("/login", loginLimiter, async (req, res) => {
     }
 
     const user = await usersCol().findOne({ email });
-    const matches = user ? await checkPassword(password, user.passwordHash) : false;
+    // Constant-time comparison: execute bcrypt even when email does not exist
+    // to prevent timing-based user enumeration attacks.
+    const hashToCompare = user?.passwordHash || DUMMY_HASH;
+    const matches = await checkPassword(password, hashToCompare);
     if (!user || !matches) {
       res.status(401).json({ error: "Email or password is wrong." });
       return;
     }
 
-    res.json({ token: signToken(user._id), user: publicUser(user) });
+    const tokenVersion = user.tokenVersion || 1;
+    res.json({ token: signToken(user._id, tokenVersion), user: publicUser(user) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not sign you in." });
@@ -131,6 +141,22 @@ router.get("/me", requireAuth, async (req, res) => {
     return;
   }
   res.json({ user: publicUser(user) });
+});
+
+router.post("/logout", requireAuth, async (req, res) => {
+  try {
+    // Invalidate all existing tokens for this user by bumping tokenVersion
+    await usersCol().updateOne(
+      { _id: new ObjectId(req.userId) },
+      { $inc: { tokenVersion: 1 } }
+    );
+    // Forcefully disconnect and clean up active socket connections
+    revokeUserSockets(req.userId);
+    res.json({ ok: true, message: "Logged out successfully." });
+  } catch (err) {
+    console.error("Logout failed:", err.message);
+    res.status(500).json({ error: "Could not log out." });
+  }
 });
 
 export default router;

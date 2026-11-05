@@ -132,6 +132,13 @@ export default function OfficeApp({ user, stream, mixer, micNote, onLeave, onAut
       onLeaveRef.current("You joined the office in another window.");
     });
 
+    socket.on("session:revoked", () => {
+      replaced = true;
+      socket.io.reconnection(false);
+      setToken(null);
+      onAuthExpiredRef.current();
+    });
+
     socket.on("disconnect", (reason) => {
       if (!alive || replaced) return;
       if (reason === "io client disconnect") return;

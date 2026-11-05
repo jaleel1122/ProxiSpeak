@@ -47,7 +47,12 @@ export default function App() {
     }
   }
 
-  function logout() {
+  async function logout() {
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+    } catch {
+      /* ignore network errors on logout */
+    }
     setSession(null);
     setToken(null);
     setUser(null);
