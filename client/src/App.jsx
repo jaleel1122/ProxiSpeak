@@ -1,64 +1,120 @@
-import React, { useState, useEffect } from 'react';
-import socket from './services/socket';
-import JoinWorkspace from './components/workspace/JoinWorkspace';
-import Workspace from './components/workspace/Workspace';
+import { useEffect, useState } from "react";
+import { api, getToken, setToken } from "./api.js";
+import { SpatialMixer } from "./audio/SpatialMixer.js";
+import AuthScreen from "./components/AuthScreen.jsx";
+import Lobby from "./components/Lobby.jsx";
+import OfficeApp from "./components/OfficeApp.jsx";
 
-/**
- * App Component - Root ProxiSpeak Controller
- * 
- * Manages:
- * - Active workspace joining lifecycle (Join Workspace Screen -> Main Office Workspace)
- * - Persistent display name management
- * - Socket.IO client connection monitoring (ready for Phase 3 multiplayer sync)
- */
 export default function App() {
-  const [username, setUsername] = useState('');
-  const [hasJoined, setHasJoined] = useState(false);
-  const [isConnected, setIsConnected] = useState(socket.connected);
+  const [booting, setBooting] = useState(() => Boolean(getToken()));
+  const [user, setUser] = useState(null);
+  const [session, setSession] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [entering, setEntering] = useState(false);
+  const [error, setError] = useState("");
 
-  // Monitor Socket.IO connection status
   useEffect(() => {
-    function onConnect() {
-      setIsConnected(true);
-    }
-
-    function onDisconnect() {
-      setIsConnected(false);
-    }
-
-    socket.on('connect', onConnect);
-    socket.on('disconnect', onDisconnect);
-
-    if (socket.connected) {
-      onConnect();
-    }
-
+    if (!getToken()) return undefined;
+    let cancelled = false;
+    api("/api/auth/me")
+      .then((data) => {
+        if (!cancelled) setUser(data.user);
+      })
+      .catch(() => {
+        setToken(null);
+      })
+      .finally(() => {
+        if (!cancelled) setBooting(false);
+      });
     return () => {
-      socket.off('connect', onConnect);
-      socket.off('disconnect', onDisconnect);
+      cancelled = true;
     };
   }, []);
 
-  const handleJoin = (displayName) => {
-    setUsername(displayName);
-    setHasJoined(true);
-  };
+  async function submitAuth({ mode, email, password, displayName }) {
+    setError("");
+    setSubmitting(true);
+    try {
+      const path = mode === "register" ? "/api/auth/register" : "/api/auth/login";
+      const body = mode === "register" ? { email, password, displayName } : { email, password };
+      const data = await api(path, { method: "POST", body: JSON.stringify(body) });
+      setToken(data.token);
+      setUser(data.user);
+    } catch (err) {
+      setError(err.message || "Could not sign you in.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
-  const handleLeave = () => {
-    setHasJoined(false);
-  };
+  function logout() {
+    setSession(null);
+    setToken(null);
+    setUser(null);
+    setError("");
+  }
+
+  async function enterOffice() {
+    setError("");
+    setEntering(true);
+    const mixer = new SpatialMixer();
+    try {
+      await mixer.unlock();
+      let stream = null;
+      let micNote = "";
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          video: false,
+        });
+      } catch {
+        micNote = "Microphone is off. You can still hear people nearby.";
+      }
+      setSession({ stream, mixer, micNote });
+    } catch {
+      mixer.close();
+      setError("Could not start audio in this browser.");
+    } finally {
+      setEntering(false);
+    }
+  }
+
+  if (booting) {
+    return (
+      <main className="gate">
+        <section className="gate-card">
+          <p className="brand">ProxiSpeak</p>
+          <p className="quiet">Checking your session…</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen onSubmit={submitAuth} error={error} submitting={submitting} />;
+  }
+
+  if (!session) {
+    return (
+      <Lobby user={user} entering={entering} error={error} onEnter={enterOffice} onLogout={logout} />
+    );
+  }
 
   return (
-    <div className="proxispeak-app">
-      {!hasJoined ? (
-        <JoinWorkspace onJoin={handleJoin} socketConnected={isConnected} />
-      ) : (
-        <Workspace
-          username={username}
-          onLeave={handleLeave}
-          socketConnected={isConnected}
-        />
-      )}
-    </div>
+    <OfficeApp
+      user={user}
+      stream={session.stream}
+      mixer={session.mixer}
+      micNote={session.micNote}
+      onLeave={(message) => {
+        setSession(null);
+        if (message) setError(message);
+      }}
+      onAuthExpired={() => {
+        setSession(null);
+        setUser(null);
+        setError("Please log in again.");
+      }}
+    />
   );
 }
