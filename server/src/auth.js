@@ -125,4 +125,3 @@ export async function authenticateSocket(socket, next) {
     next(new Error("Unauthorized"));
   }
 }
-
